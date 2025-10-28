@@ -340,6 +340,10 @@ class GPTModel(LanguageModule):
                 rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
                     inference_context, self.decoder, decoder_input, self.config, packed_seq_params
                 )
+                
+                if getattr(self.config, 'dlm_paradigm', None) == 'block_diff':
+                    rotary_seq_len = rotary_seq_len // 2
+
                 rotary_pos_emb = self.rotary_pos_emb(
                     rotary_seq_len,
                     packed_seq=packed_seq_params is not None

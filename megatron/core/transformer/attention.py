@@ -820,10 +820,52 @@ class Attention(MegatronModule, ABC):
                     cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
-
+            
+            
+            # TODO(abhinav): For now right now split_qkv is always true but look into case it's false
+            # Check if we need to split query/key for RoPE application
+            # This happens when pos_emb sequence length is half of query/key sequence length
+            split_rope = False
+            if q_pos_emb is not None and q_pos_emb.shape[0] * 2 == query.shape[0]:
+                split_rope = True
+            
             if split_qkv:
                 if q_pos_emb is not None:
                     # TODO VIJAY: simplify
+                    if split_rope:
+                        # Split query into two halves along sequence dimension
+                        seq_len = query.shape[0]
+                        half_seq_len = seq_len // 2
+                        q1 = query[:half_seq_len]
+                        q2 = query[half_seq_len:]
+                        
+                        # Apply RoPE independently to each half
+                        if inference_context is None or inference_context.is_static_batching():
+                            q1 = apply_rotary_pos_emb(
+                                q1,
+                                q_pos_emb,
+                                config=self.config,
+                                cu_seqlens=cu_seqlens_q,
+                                cp_group=self.pg_collection.cp,
+                            )
+                            q2 = apply_rotary_pos_emb(
+                                q2,
+                                q_pos_emb,
+                                config=self.config,
+                                cu_seqlens=cu_seqlens_q,
+                                cp_group=self.pg_collection.cp,
+                            )
+                        else:
+                            q1 = inference_context.apply_rotary_emb_query(
+                                q1, q_pos_emb, self.config, cu_seqlens_q, self.pg_collection.cp
+                            )
+                            q2 = inference_context.apply_rotary_emb_query(
+                                q2, q_pos_emb, self.config, cu_seqlens_q, self.pg_collection.cp
+                            )
+                        
+                        # Recombine the halves
+                        query = torch.cat([q1, q2], dim=0)
+                else:
                     if inference_context is None or inference_context.is_static_batching():
                         query = apply_rotary_pos_emb(
                             query,
@@ -838,14 +880,40 @@ class Attention(MegatronModule, ABC):
                             query, q_pos_emb, self.config, cu_seqlens_q, self.pg_collection.cp
                         )
                 if k_pos_emb is not None:
-                    key = apply_rotary_pos_emb(
-                        key,
-                        k_pos_emb,
-                        config=self.config,
-                        cu_seqlens=cu_seqlens_kv,
-                        mscale=_yarn_get_concentration_factor_from_config(self.config),
-                        cp_group=self.pg_collection.cp,
-                    )
+                    if split_rope:
+                        # Split key into two halves along sequence dimension
+                        seq_len = key.shape[0]
+                        half_seq_len = seq_len // 2
+                        k1 = key[:half_seq_len]
+                        k2 = key[half_seq_len:]
+                        
+                        # Apply RoPE independently to each half
+                        k1 = apply_rotary_pos_emb(
+                            k1,
+                            k_pos_emb,
+                            config=self.config,
+                            cu_seqlens=cu_seqlens_kv,
+                            cp_group=self.pg_collection.cp,
+                        )
+                        k2 = apply_rotary_pos_emb(
+                            k2,
+                            k_pos_emb,
+                            config=self.config,
+                            cu_seqlens=cu_seqlens_kv,
+                            cp_group=self.pg_collection.cp,
+                        )
+                        
+                        # Recombine the halves
+                        key = torch.cat([k1, k2], dim=0)
+                    else:
+                        key = apply_rotary_pos_emb(
+                            key,
+                            k_pos_emb,
+                            config=self.config,
+                            cu_seqlens=cu_seqlens_kv,
+                            mscale=_yarn_get_concentration_factor_from_config(self.config),
+                            cp_group=self.pg_collection.cp,
+                        )
             else:
                 query, key, value = apply_fused_qkv_rotary_pos_emb(
                     mixed_qkv, q_pos_emb, k_pos_emb, qkv_split_arg_list
